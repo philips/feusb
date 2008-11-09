@@ -110,13 +110,8 @@ class Feusb:
 
     def __del__(self):
         """Close the port."""
-        try:
-            if self._handle:
-                self._handle.close()
-        except Exception, e:
-            raise UnexpectedError('Unexpected error in __del__.\n'
-                                  "%s\nDetails: %s"
-                                  %(str(type(e)),str(e)))
+        if hasattr(self, "_handle"):
+            self._handle.close()
 
     def error_on_suspend(self, new_error_on_suspend=None):
         """Return error_on_suspend status, with optional set parameter."""
