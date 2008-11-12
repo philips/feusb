@@ -1,0 +1,8 @@
+# Facinating Electronics USB device naming
+# 
+# For future device:
+# SUBSYSTEM=="tty" ATTRS{idVendor}=="12ff" ATTRS{idProduct}=="" SYMLINK+="fehdc$attr{serial}"
+# SUBSYSTEM=="tty" ATTRS{idVendor}=="12ff" ATTRS{idProduct}=="" SYMLINK+="feldc$attr{serial}"
+#
+
+SUBSYSTEM=="tty" ATTRS{idVendor}=="12ff" ATTRS{idProduct}=="0101" SYMLINK+="fercs$attr{serial}"
