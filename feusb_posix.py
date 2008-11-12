@@ -303,7 +303,8 @@ class Feusb:
         return self._status
 
 if __name__=='__main__':
-    print 'feusb_win32 - Fascinating Electronics USB comm port class.'
+    print 'feusb_posix - Fascinating Electronics USB comm port class.'
+    print 'NOTE: only devices you have permission to open will be listed'
     # OPEN THE PORT
     while True:
         print '\nAvailable Ports\nSEL   Comm Port\n---   ---------'
