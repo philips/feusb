@@ -52,7 +52,7 @@ def port_list():
     ports = []
     list = []
     list.extend(glob.glob('/dev/ttyACM*'))
-#    list.extend(glob.glob('/dev/fercs*'))
+    list.extend(glob.glob('/dev/fercs*'))
     for port in list:
         try:
             p = Feusb(port)
