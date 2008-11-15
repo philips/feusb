@@ -10,6 +10,6 @@ while true; do
 	sleep 1;
 	./fe-dev-info.sh
 	if [ $? -eq 0 ]; then
-		pause "Press any key to continue..."
+		pause "Press enter to continue scanning..."
 	fi
 done
