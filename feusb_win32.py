@@ -31,20 +31,21 @@ import msvcrt
 import exceptions
 import time
 
-TIMEOUTS = (0, 0, 1000, 0, 1000) #milliseconds - read timeout - write timeout
+TIMEOUTS = (0, 0, 20, 0, 1000) #milliseconds - read timeout - write timeout
 COMMAND_INTERVAL = 0.001    #seconds - process command to read reply
 RETRY_INTERVAL = 0.001      #seconds
-RETRY_LIMIT = 100           #max number of read retries per reply
-SUSPEND_INTERVAL = 1.0      #seconds
+RETRY_LIMIT = 20            #max number of read retries per reply
+SUSPEND_INTERVAL = 1.000    #seconds
 PORT_OK = 'PORT_OK'         #port status conditions
 SUSPENDED = 'SUSPENDED'
 DISCONNECTED = 'DISCONNECTED'
-UNRESPONSIVE = 'UNRESPONSIVE'
 BEL = '\a'                  #non-printing bel character
 ERRNUM_CANNOT_OPEN = 2      #The system cannot find the file specified.
 ERRNUM_ACCESS_DENIED = 5    #Access is denied.
 ERRNUM_SUSPENDED = 31       #A device attached to the system is not functioning.
 ERRNUM_DISCONNECTED = 1167  #The device is not connected.
+PURGE_RXCLEAR = 0x0008      #Windows PurgeComm flag
+PURGE_TXCLEAR = 0x0004      #Windows PurgeComm flag
 
 def get_ch():
     """Read a keyboard character on all supported operating systems.
@@ -67,16 +68,31 @@ def port_list():
         else:
             port = r'\\.\COM%d'%port_number
         try:
-            p = Feusb(port)
-        except OpenError:
-            pass
+            handle = win32file.CreateFile(port, #port name
+                                          win32con.GENERIC_READ |
+                                          win32con.GENERIC_WRITE,
+                                          0, #exclusive access
+                                          None, #no security
+                                          win32con.OPEN_EXISTING,
+                                          win32con.FILE_ATTRIBUTE_NORMAL,
+                                          None) #no template
+        except pywintypes.error, e:
+            if e[0] != ERRNUM_CANNOT_OPEN and e[0] != ERRNUM_ACCESS_DENIED:
+                raise UnexpectedError('Unexpected pywintypes.error in'
+                                      'port_list.\n%s\nDetails: %s'
+                                      %(str(type(e)),str(e)))
         except Exception, e:
             raise UnexpectedError('Unexpected error in port_list.\n'
                                   '%s\nDetails: %s'
-                                  %(str(type(e)),str(e)))
+                                  %(str(type(e)),str(e)))            
         else:
             ports.append(port)
-            del p
+            try:
+                win32file.CloseHandle(handle)
+            except Exception, e:
+                raise UnexpectedError('Unexpected CloseHandle error in '
+                                      'port_list.\n%s\nDetails: %s'
+                                      %(str(type(e)),str(e)))
     return ports
 
 
@@ -124,7 +140,6 @@ class Feusb:
                                                 None) #no template
             win32file.SetupComm(self._handle, 16384, 16384) #allocate buffers
             win32file.SetCommTimeouts(self._handle, TIMEOUTS)
-            # **** NEED TO FLUSH INPUT BUFFER HERE ****
         except pywintypes.error, e:
             if e[0] == ERRNUM_CANNOT_OPEN or e[0] == ERRNUM_ACCESS_DENIED:
                 raise OpenError('Unable to open port %s.'%self._port_string)
@@ -138,17 +153,72 @@ class Feusb:
                                   %(str(type(e)),str(e)))            
         else:
             self._status = PORT_OK
+            self.purge()
 
     def __del__(self):
         """Close the port."""
         try:
+            print "DEBUG: Closing %s in __del__."%self._port_string
             win32file.CloseHandle(self._handle)
         except AttributeError:
+            print "DEBUG: Attribute error, handle not found in __del__."
             pass #self._handle not found
         except Exception, e:
+            print "DEBUG: Unexpected error in __del__."
             raise UnexpectedError('Unexpected error in __del__.\n'
                                   "%s\nDetails: %s"
                                   %(str(type(e)),str(e)))
+
+    def purge(self):
+        """Purge input buffer and attempt to purge device responses."""
+        if len(self._string_buffer) > 0:
+#            print 'DEBUG: Purging string_buffer of %d characters.'%len(self._string_buffer)
+            self._string_buffer = ''
+        if self._status is DISCONNECTED:
+            raise DisconnectError("Port %s is disconnected."
+                                  %self._port_string)
+        retries = 0
+#        print 'DEBUG: Purging characters from device buffer.'
+        while retries < RETRY_LIMIT:
+            time.sleep(RETRY_INTERVAL)
+            try:
+                flags, comstat = win32file.ClearCommError(self._handle)
+            except pywintypes.error, e:
+                if e[0] == ERRNUM_SUSPENDED:
+                    self._status = SUSPENDED
+                    if self._error_on_suspend:
+                        raise SuspendError("Port %s is suspended."
+                                           %self._port_string)
+                    else:
+                        time.sleep(SUSPEND_INTERVAL)
+                else:
+                    raise UnexpectedError('Unexpected pywintypes.error in '
+                                          'purge.\n%s\nDetails: %s'
+                                          %(str(type(e)),str(e)))
+            except Exception, e:
+                raise UnexpectedError('Unexpected error in purge.\n'
+                                      '%s\nDetails: %s'
+                                      %(str(type(e)),str(e)))
+            else:
+                if self._status is SUSPENDED:
+                    self._status = PORT_OK
+                if comstat.cbInQue > 0:
+                    retries = 0
+                    print comstat.cbInQue,
+                    try:
+                        win32file.PurgeComm(self._handle,
+                                            PURGE_RXCLEAR | PURGE_TXCLEAR)
+                    except Exception, e:
+                        raise UnexpectedError('Unexpected PurgeComm error '
+                                              'in purge.\n'
+                                              '%s\nDetails: %s'
+                                              %(str(type(e)),str(e)))
+                else:
+#                    if retries == 0:
+#                        print '\nDEBUG: No characters, retry countdown.'
+                    retries += 1
+#                    print retries,
+#        print '\nDEBUG: Exiting purge.'
 
     def error_on_suspend(self, new_error_on_suspend=None):
         """Return error_on_suspend status, with optional set parameter."""
@@ -305,6 +375,7 @@ class Feusb:
             except pywintypes.error, e:
                 if e[0] == ERRNUM_DISCONNECTED:
                     self._status = DISCONNECTED
+                    print "DEBUG: Closing %s in raw_write."%self._port_string
                     win32file.CloseHandle(self._handle)
                     raise DisconnectError("Port %s is disconnected."
                                           %self._port_string)
@@ -378,7 +449,6 @@ class Feusb:
                                                 None) #no template
             win32file.SetupComm(self._handle, 16384, 16384)
             win32file.SetCommTimeouts(self._handle, TIMEOUTS)
-            #NEED TO FLUSH COMM READ BUFFER HERE
         except pywintypes.error, e:
             if e[0] == ERRNUM_CANNOT_OPEN or e[0] == ERRNUM_ACCESS_DENIED:
                 raise OpenError('Unable to reopen port %s.'%self._port_string)
@@ -391,8 +461,8 @@ class Feusb:
                                   '%s\nDetails: %s'
                                   %(str(type(e)),str(e)))
         else:
-            self._string_buffer = ''
             self._status = PORT_OK
+            self.purge()
         return self._status
 
 if __name__=='__main__':
@@ -433,7 +503,7 @@ if __name__=='__main__':
                 break
             print 'Sleeping for 1 mS.'
             time.sleep(.001)
-        print 'Testing:  raw_read()\nReply received below:\n', dev.raw_read(),
+        print 'Testing:  raw_read()\nReply received:\n', dev.raw_read(),
         # NUMERIC READ FORMAT TESTS
         print "Testing:  read('m1')"
         print 'Reply received:  ', dev.read('m1')
@@ -450,42 +520,18 @@ if __name__=='__main__':
         print r[56:112]
         print r[112:168]
         print r[168:]
-        # STATUS TESTS
-        print 'Testing:  status()\n*** Unplug the device ***'
-        old_stat = ''
-        while True:
-            stat = dev.status()
-            if old_stat is not stat:
-                print 'Device status is: ', stat
-            old_stat = stat
-            if stat is DISCONNECTED:
-                break
-            time.sleep(0.050)
-        print 'Testing:  reconnect()'
-        while True:
-            try:
-                dev.reconnect()
-            except OpenError, e:
-                time.sleep(0.100)
-            else:
-                print "Verifying reconnect:"
-                dev.raw_write('u\r')
-                while dev.waiting() < 1:
-                    print 'Sleeping for 1 mS.'
-                    time.sleep(0.001)
-                print dev.raw_read(),
-                break
-        # SUSPEND/RESUME DURING READ
+        # SUSPEND/RESUME DURING RAW_READ
         print "Testing:  raw_write, raw_waiting, raw_read, error_on_suspend."
         print "Sleep/resume computer to test for read errors."
-        print "Disconnect device to end the test."
+        print "Disconnect device to end this test."
         NUMCMDS = 240
         dev.raw_write('cs\r')
         while dev.waiting() < 1:
             time.sleep(0.001)
         comparison_string = dev.raw_read()
         comparison_length = len(comparison_string)
-        print "Each 'r' represents %d characters read."%(NUMCMDS*comparison_length)
+        print ("Each 'r' represents %d characters read."
+               %(NUMCMDS*comparison_length))
         dev.error_on_suspend(True)
         keep_going = True
         while keep_going:
@@ -493,11 +539,11 @@ if __name__=='__main__':
                 try:
                     dev.raw_write('s'*NUMCMDS+'\r')
                 except SuspendError:
-                    print "SuspendError reported during raw_write().",
-                    print "Sleeping 1 second."
+                    print ('SuspendError reported during raw_write(). '
+                           'Sleeping 1 second.')
                     time.sleep(1.0)
                 except DisconnectError:
-                    print "DisconnectError reported during raw_write()."
+                    print 'DisconnectError reported during raw_write().'
                     keep_going = False
                     break
                 else:
@@ -509,8 +555,8 @@ if __name__=='__main__':
                 try:
                     num_of_characters = dev.raw_waiting()
                 except SuspendError:
-                    print "SuspendError reported during raw_waiting(). ",
-                    print "Sleeping 1 second."
+                    print ('SuspendError reported during raw_waiting(). '
+                           'Sleeping 1 second.')
                     time.sleep(1.0)
                 else:
                     read_tries += 1
@@ -519,42 +565,148 @@ if __name__=='__main__':
                         try:
                             response = dev.raw_read(comparison_length)
                         except SuspendError:
-                                print "SuspendError during raw_read(). ",
-                                print "Sleeping 1 second."
+                                print ('SuspendError during raw_read(). '
+                                       'Sleeping 1 second.')
                                 time.sleep(1.0)
                         else:
                             responses_read += 1
                             if response != comparison_string:
                                 print "\nResponse does not match expected:"
                                 print response
-                                #flush remaining buffer
-                                print "Flushing remaining characters."
-                                while len(response) > 0:
-                                    time.sleep(0.25)
-                                    try:
-                                        response = dev.raw_read()
-                                    except SuspendError:
-                                        print "SuspendError while flushing buffer."
-                                        time.sleep(0.75)
-                                    else:
-                                        print "Flushed %d characters."%len(response)
+                                print "Purging remaining characters."
+                                dev.purge()
                                 break
-                    if read_tries >= 10:
-                        print "10 attempted reads without getting a full response."
+                    if read_tries >= RETRY_LIMIT:
+                        print ('\n%d attempted reads without getting a full '
+                               'response.'%RETRY_LIMIT)
+                        time.sleep(0.500) #time for a disconnect to be detected
                         current_status = dev.status()
-                        print "dev.status() reports: %s"%current_status
+                        print 'dev.status() reports: %s'%current_status
                         if current_status is DISCONNECTED:
                             keep_going = False
-                        else:
-                            print "%d responses read correctly so far."%responses_read
-                            print "Number of waiting characters: ", num_of_characters
-                            if num_of_characters > 0:
-                                print "Response at this time:"
-                                print dev.raw_read()
                             break
-                    time.sleep(0.002)
+                        else:
+                            print ('%d responses read correctly so far.'
+                                   %responses_read)
+                            print ('Number of waiting characters: %d'
+                                   %num_of_characters)
+                            if num_of_characters > 0:
+                                print 'Response at this time:'
+                                print dev.raw_read()
+                        print 'Port is probably unresponsive.'
+                        ri = raw_input('Hit <enter> to exit, or any key '
+                                       '<enter> to disconnect and reconnect ->')
+                        if ri == '':
+                            exit()
+                        else:
+                            print '*** Unplug the device ***'
+                            old_stat = ''
+                            stat = ''
+                            while stat is not DISCONNECTED:
+                                stat = dev.status()
+                                if old_stat is not stat:
+                                    print 'Device status is:', stat
+                                old_stat = stat
+                                time.sleep(0.050)
+                            print '*** Plug in the device ***'
+                            while True:
+                                try:
+                                    dev.reconnect()
+                                except OpenError:
+                                    time.sleep(0.050)
+                                else:
+                                    break
+                            print 'Device status is:', dev.status()
+                            break
+                    time.sleep(RETRY_INTERVAL)
             if responses_read == NUMCMDS:
                 print 'r',
+        dev.error_on_suspend(False)
+        if dev.status() is not PORT_OK:        
+            print '*** Plug in the device ***'
+            while True:
+                try:
+                    dev.reconnect()
+                except OpenError:
+                    time.sleep(0.100)
+                else:
+                    break
+        # SUSPEND/RESUME DURING READ
+        print "Testing:  read (and consequently write)."
+        print "Sleep/resume computer to test for read errors."
+        print "Disconnect device to end this test."
+        NUMCMDS = 240
+        dev.raw_write('S\r')
+        while dev.waiting() < 1:
+            time.sleep(RETRY_INTERVAL)
+        comp_len = dev.raw_waiting()
+        comp = dev.read()
+        print ("Each '*' represents %d characters and %d commands read."
+               %(comp_len*NUMCMDS, NUMCMDS))
+        while True:
+            try:
+                responses = dev.read('S'*NUMCMDS, NUMCMDS)
+            except DisconnectError, e:
+                print 'DisconnectError reported during read().'
+                print 'Details:\n', e
+                break
+            except ReadTimeoutError, e:
+                print 'ReadTimeoutError reported during read().'
+                print 'Details:\n', e
+                print '%d characters in input buffer.'%dev.raw_waiting()
+                print '%d responses in input buffer.'%dev.waiting()
+                print 'Purging port.'
+                dev.purge()
+                # test port status (could have timed out due to disconnect)
+                print 'Testing port status.'
+                status = dev.status()
+                while status is not PORT_OK:
+                    if status == DISCONNECTED:
+                        print 'Port status is actually DISCONNECTED.'
+                        break
+                    elif status == SUSPENDED:
+                        print 'Status is SUSPENDED. Sleeping 1 second.'
+                        time.sleep(1.000)
+                    status = dev.status()
+                if status is DISCONNECTED:
+                    break
+                elif status is PORT_OK:
+                    print 'Port status returns PORT_OK.'
+                else:
+                    print 'Port status error!'
+                try:        # test for port unresponsive
+                    response = dev.read('U')
+                except DisconnectError, e:
+                    print 'DisconnectError reported testing responsiveness.'
+                    print 'Details:\n', e
+                    break
+                except ReadTimeoutError, e:
+                    print 'ReadTimeoutError reported testing responsiveness.'
+                    print 'Details:\n', e
+                    print 'Port is unresponsive.'
+                    print '*** Unplug the device ***'
+                    old_stat = ''
+                    stat = ''
+                    while stat is not DISCONNECTED:
+                        stat = dev.status()
+                        if old_stat is not stat:
+                            print 'Device status is:', stat
+                        old_stat = stat
+                        time.sleep(0.050)
+                    break
+                else:
+                    print 'Port checks out OK.'
+            else:
+                match = 0
+                for response in responses:
+                    if comp == response:
+                        match += 1
+                    else:
+                        print 'Expected: %s Got: %s'%(repr(comp),repr(response))
+                if match == NUMCMDS:
+                    print '*',
+                else:
+                    print '\n%d of %d match correctly.'%(match, NUMCMDS)
         print 'Reconnecting.'
         while True:
             try:
@@ -563,37 +715,6 @@ if __name__=='__main__':
                 time.sleep(0.100)
             else:
                 break
-        # *********** THIS MAY HAVE BEEN HANDLED BY THE PREVIOUS TESTING ***********
-        print "Read-Suspend Testing. Suspend and resume computer several times."
-        print "To exit this test, disconnect the device and reattach."
-        read_count = 0
-        while read_count != -1:
-            read_count += 1
-            try:
-                anA, sA = dev.read('ms', 2)
-                sB, anB = dev.read('sm', 2)
-            except DisconnectError, e:
-                print "%s Reconnect to continue."%e
-                while True:
-                    try:
-                        dev.reconnect()
-                    except OpenError, e:
-                        time.sleep(0.100)
-                    else:
-                        read_count = -1
-                        break
-            except ReadTimeoutError, e:
-                print "Unexpected ReadTimeoutError! %s"%e
-            except FeusbError, e:
-                print "Unexpected FeusbError! %s"%e
-            else:
-                if (len(anA) == 8 and len(sA) == 16 and
-                    len(sB) == 16 and len(anB) == 8):
-                    if read_count % 100 == 0:
-                        print "Reads are OK %6i times."%read_count
-                else:
-                    print "Read value length mismatch occurred."
-                    read_count = 0
         # GET_CH() TEST
         print 'WARNING:  get_ch() only works in a console window,'
         print 'it will cause the interactive Python window (IDLE) to hang.'
