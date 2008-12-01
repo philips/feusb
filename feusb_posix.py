@@ -26,6 +26,7 @@ import os
 import select
 import struct
 import fcntl
+import traceback
 
 TIMEOUTS = (0, 0, 20, 0, 1000) #milliseconds - read timeout - write timeout
 COMMAND_INTERVAL = 0.001    #seconds - process command to read reply
@@ -35,7 +36,6 @@ SUSPEND_INTERVAL = 1.000    #seconds
 PORT_OK = 'PORT_OK'         #port status conditions
 SUSPENDED = 'SUSPENDED'
 DISCONNECTED = 'DISCONNECTED'
-UNRESPONSIVE = 'UNRESPONSIVE'
 BEL = '\a'                  #non-printing bel character
 ERRNUM_CANNOT_OPEN = 2      #The system cannot find the file specified.
 ERRNUM_ACCESS_DENIED = 5    #Access is denied.
@@ -92,15 +92,68 @@ class UnexpectedError(FeusbError):
 
 class Feusb:
     """Fascinating Electronics USB-CDC device class."""
-    
+
+    BaudRatesDic={
+        110: termios.B110,
+        300: termios.B300,
+        600: termios.B600,
+        1200: termios.B1200,
+        2400: termios.B2400,
+        4800: termios.B4800, 
+        9600: termios.B9600,
+        19200: termios.B19200,
+        38400: termios.B38400,
+        57600: termios.B57600,
+        115200: termios.B115200
+        }
+
     def __init__(self, port_string, error_on_suspend=False):
         """Open the port and allocate buffers."""
+
+        self._handle = -1
         self._port_string = port_string
         self._error_on_suspend = error_on_suspend
         self._string_buffer = ''
         self._status = DISCONNECTED
         try:
-            self._handle = open(self._port_string, "rb+")
+            self._handle = os.open(self._port_string, os.O_RDWR, 0)
+
+            self.__speed=115200
+    
+            # Save the initial port configuration
+            self.__oldmode = termios.tcgetattr(self._handle)
+            # self.__params is a list of attributes of the file descriptor
+            # self._handle as follows:
+            # [c_iflag, c_oflag, c_cflag, c_lflag, c_ispeed, c_ospeed, cc]
+            # where cc is a list of the tty special characters.
+            self.__params=[]
+            # c_iflag
+            self.__params.append(termios.IGNPAR)
+            # c_oflag
+            self.__params.append(0)
+            # c_cflag
+            self.__params.append(termios.CS8|termios.CLOCAL|termios.CREAD)
+            # c_lflag
+            self.__params.append(0)
+            # c_ispeed
+            self.__params.append(self.BaudRatesDic[self.__speed]) 
+            # c_ospeed
+            self.__params.append(self.BaudRatesDic[self.__speed]) 
+            cc=[0]*termios.NCCS
+            # A reading is only complete when VMIN characters have
+            # been received (blocking reading)
+            cc[termios.VMIN]=1
+            cc[termios.VTIME]=0
+            # Non-blocking reading. The reading operation returns
+            # inmeditately, returning the characters waiting to 
+            # be read.
+            cc[termios.VMIN]=0
+            cc[termios.VTIME]=0
+    
+            self.__params.append(cc)               # c_cc
+    
+            termios.tcsetattr(self._handle, termios.TCSANOW, self.__params)
+
 	except exceptions.IOError, e:
 		raise OpenError()
         except Exception, e:
@@ -113,13 +166,14 @@ class Feusb:
 
     def __del__(self):
         """Close the port."""
-        if hasattr(self, "_handle"):
-            self._handle.close()
+        if self._handle is not -1:
+            os.close(self._handle)
+            self._handle = -1
 
     def purge(self):
         """Purge input buffer and attempt to purge device responses."""
         if len(self._string_buffer) > 0:
-            print 'DEBUG: Purging string_buffer of %d characters.'%len(self._string_buffer)
+#            print 'DEBUG: Purging string_buffer of %d characters.'%len(self._string_buffer)
             self._string_buffer = ''
         if self._status is DISCONNECTED:
             raise DisconnectError("Port %s is disconnected."
@@ -142,6 +196,10 @@ class Feusb:
         try:
             s = fcntl.ioctl(self._handle, TIOCINQ, TIOCM_zero_str)
             in_que = struct.unpack('I',s)[0]
+        except IOError, e:
+            self._status = DISCONNECTED
+            raise DisconnectError("Port %s needs to be reconnected."
+                                  %self._port_string)
         except Exception, e:
             raise UnexpectedError('Unexpected error in raw_waiting.\n'
                                   '%s\nDetails: %s'
@@ -151,10 +209,7 @@ class Feusb:
                 self._status = PORT_OK
             if in_que > 0:
                 try:
-                     buff = self._handle.read(in_que)
-	             #f = open("/tmp/log", "rb+")
-                     #f.write(self._string_buffer)
-                     #f.close()
+                     buff = os.read(self._handle, in_que)
                 except Exception, e:
                     raise UnexpectedError('Unexpected ReadFile error '
                                           'in raw_waiting.\n'
@@ -173,7 +228,7 @@ class Feusb:
     def waiting(self):
         """Update buffer, return the number of replies available."""
         self.raw_waiting()  #update _string_buffer
-        return self._string_buffer.count('\n\n')
+        return self._string_buffer.count('\r\n')
 
     def raw_read(self, limit=None):
         "Return any characters available (a string), with an optional limit."
@@ -229,7 +284,7 @@ class Feusb:
                     old_replies = current_replies
                 time.sleep(RETRY_INTERVAL)
             current_replies = self.waiting()
-        all_replies = self._string_buffer.split("\n\n")
+        all_replies = self._string_buffer.split("\r\n")
         return_value = []
         for i in range(count):
             reply_lines = all_replies.pop(0).splitlines()
@@ -252,12 +307,12 @@ class Feusb:
                 return_value.append(command_reply[0])
             else:
                 return_value.append(command_reply)
-        self._string_buffer = "\n\n".join(all_replies)
+        self._string_buffer = "\r\n".join(all_replies)
         if len(return_value) == 1:
             return return_value[0]
         else:
             return return_value
-            
+
     def raw_write(self, string=''):
         """Write a command string to the port.
 
@@ -268,8 +323,7 @@ class Feusb:
             raise DisconnectError("Port %s needs to be reconnected before use."
                                   %self._port_string)
         while True:
-            self._handle.write(string)
-            self._handle.flush()
+            os.write(self._handle, string)
             self._status = PORT_OK
             return
 
@@ -288,9 +342,8 @@ class Feusb:
         if self._status is DISCONNECTED:
             return self._status
         try:
-            self._handle.write(BEL)
-            self._handle.flush()
-	except IOError, e:
+            os.write(self._handle, BEL)
+	except OSError, e:
             if e.errno == 5:
                 self._status = DISCONNECTED
         except Exception, e:
@@ -306,11 +359,12 @@ class Feusb:
         if self._status is not DISCONNECTED:
             raise OpenError("Port %s is not disconnected."%self._port_string)
         try:
-            self._handle.close()
-            self._handle = open(self._port_string, "rb+")
-            #NEED TO FLUSH COMM READ BUFFER HERE
-        except IOError, e:
-            raise OpenError('Unable to reopen port %s.'%self._port_string)
+            if self._handle is not -1:
+                os.close(self._handle)
+            self._handle = os.open(self._port_string, os.O_RDWR, 0) 
+        except OSError, e:
+            if e.errno == 22:
+                raise OpenError('Unable to reopen port %s.'%self._port_string)
         except Exception, e:
             raise UnexpectedError('Unexpected error in reconnect.\n'
                                   '%s\nDetails: %s'
@@ -404,6 +458,7 @@ if __name__=='__main__':
                     break
                 else:
                     print 'w',
+                    sys.stdout.flush()
                     break
             read_tries = 0
             responses_read = 0
@@ -414,6 +469,10 @@ if __name__=='__main__':
                     print ('SuspendError reported during raw_waiting(). '
                            'Sleeping 1 second.')
                     time.sleep(1.0)
+                except DisconnectError:
+                    print 'DisconnectError reported during raw_write().'
+                    keep_going = False
+                    break
                 else:
                     read_tries += 1
                     if num_of_characters >= comparison_length:
@@ -477,6 +536,7 @@ if __name__=='__main__':
                     time.sleep(RETRY_INTERVAL)
             if responses_read == NUMCMDS:
                 print 'r',
+                sys.stdout.flush()
         dev.error_on_suspend(False)
         if dev.status() is not PORT_OK:        
             print '*** Plug in the device ***'
@@ -577,5 +637,5 @@ if __name__=='__main__':
         print "Unhandled main program exception!!!"
         print type(e)
         print e
+        traceback.print_exc(sys.exc_traceback)
         raw_input("Hit enter to exit ->")
-        
