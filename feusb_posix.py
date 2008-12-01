@@ -93,9 +93,6 @@ class UnexpectedError(FeusbError):
 class Feusb:
     """Fascinating Electronics USB-CDC device class."""
 
-        115200: termios.B115200
-        }
-
     def __init__(self, port_string, error_on_suspend=False):
         """Open the port and allocate buffers."""
 
