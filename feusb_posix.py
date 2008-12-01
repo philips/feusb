@@ -27,11 +27,11 @@ import select
 import struct
 import fcntl
 
-TIMEOUTS = (0, 0, 1000, 0, 1000) #milliseconds - read timeout - write timeout
+TIMEOUTS = (0, 0, 20, 0, 1000) #milliseconds - read timeout - write timeout
 COMMAND_INTERVAL = 0.001    #seconds - process command to read reply
 RETRY_INTERVAL = 0.001      #seconds
-RETRY_LIMIT = 100           #max number of read retries per reply
-SUSPEND_INTERVAL = 1.0      #seconds
+RETRY_LIMIT = 20            #max number of read retries per reply
+SUSPEND_INTERVAL = 1.000    #seconds
 PORT_OK = 'PORT_OK'         #port status conditions
 SUSPENDED = 'SUSPENDED'
 DISCONNECTED = 'DISCONNECTED'
@@ -41,6 +41,8 @@ ERRNUM_CANNOT_OPEN = 2      #The system cannot find the file specified.
 ERRNUM_ACCESS_DENIED = 5    #Access is denied.
 ERRNUM_SUSPENDED = 31       #A device attached to the system is not functioning.
 ERRNUM_DISCONNECTED = 1167  #The device is not connected.
+PURGE_RXCLEAR = 0x0008      #Windows PurgeComm flag
+PURGE_TXCLEAR = 0x0004      #Windows PurgeComm flag
 
 import termios
 TIOCM_zero_str = struct.pack('I', 0)
@@ -98,7 +100,7 @@ class Feusb:
         self._string_buffer = ''
         self._status = DISCONNECTED
         try:
-            self._handle = open(self._port_string, "r+")
+            self._handle = open(self._port_string, "rb+")
 	except exceptions.IOError, e:
 		raise OpenError()
         except Exception, e:
@@ -107,11 +109,22 @@ class Feusb:
                                   %(str(type(e)),str(e)))
         else:
             self._status = PORT_OK
+            self.purge()
 
     def __del__(self):
         """Close the port."""
         if hasattr(self, "_handle"):
             self._handle.close()
+
+    def purge(self):
+        """Purge input buffer and attempt to purge device responses."""
+        if len(self._string_buffer) > 0:
+            print 'DEBUG: Purging string_buffer of %d characters.'%len(self._string_buffer)
+            self._string_buffer = ''
+        if self._status is DISCONNECTED:
+            raise DisconnectError("Port %s is disconnected."
+                                  %self._port_string)
+        flags = termios.tcdrain(self._handle)
 
     def error_on_suspend(self, new_error_on_suspend=None):
         """Return error_on_suspend status, with optional set parameter."""
@@ -139,6 +152,9 @@ class Feusb:
             if in_que > 0:
                 try:
                      buff = self._handle.read(in_que)
+	             #f = open("/tmp/log", "rb+")
+                     #f.write(self._string_buffer)
+                     #f.close()
                 except Exception, e:
                     raise UnexpectedError('Unexpected ReadFile error '
                                           'in raw_waiting.\n'
@@ -157,7 +173,7 @@ class Feusb:
     def waiting(self):
         """Update buffer, return the number of replies available."""
         self.raw_waiting()  #update _string_buffer
-        return self._string_buffer.count('\n')
+        return self._string_buffer.count('\n\n')
 
     def raw_read(self, limit=None):
         "Return any characters available (a string), with an optional limit."
@@ -168,6 +184,8 @@ class Feusb:
             split_location = limit
         ret_str = self._string_buffer[:split_location]
         self._string_buffer = self._string_buffer[split_location:]
+
+
         return ret_str
 
     def read(self, command=None, count=1):
@@ -211,7 +229,7 @@ class Feusb:
                     old_replies = current_replies
                 time.sleep(RETRY_INTERVAL)
             current_replies = self.waiting()
-        all_replies = self._string_buffer.split("\n")
+        all_replies = self._string_buffer.split("\n\n")
         return_value = []
         for i in range(count):
             reply_lines = all_replies.pop(0).splitlines()
@@ -234,7 +252,7 @@ class Feusb:
                 return_value.append(command_reply[0])
             else:
                 return_value.append(command_reply)
-        self._string_buffer = "\r\n".join(all_replies)
+        self._string_buffer = "\n\n".join(all_replies)
         if len(return_value) == 1:
             return return_value[0]
         else:
@@ -289,7 +307,7 @@ class Feusb:
             raise OpenError("Port %s is not disconnected."%self._port_string)
         try:
             self._handle.close()
-            self._handle = open(self._port_string, "r+")
+            self._handle = open(self._port_string, "rb+")
             #NEED TO FLUSH COMM READ BUFFER HERE
         except IOError, e:
             raise OpenError('Unable to reopen port %s.'%self._port_string)
@@ -298,206 +316,266 @@ class Feusb:
                                   '%s\nDetails: %s'
                                   %(str(type(e)),str(e)))
         else:
-            self._string_buffer = ''
             self._status = PORT_OK
+            self.purge()
         return self._status
 
 if __name__=='__main__':
-    print 'feusb_posix - Fascinating Electronics USB comm port class.'
-    print 'NOTE: only devices you have permission to open will be listed'
-    # OPEN THE PORT
-    while True:
-        print '\nAvailable Ports\nSEL   Comm Port\n---   ---------'
-        ports = ['Quit'] + port_list()
-        for i, v in enumerate(ports):
-            print '%3d     %s'%(i, v)
-        try:
-            sel = abs(int(raw_input('Select a comm port or 0 to Quit -->')))
-            ports[sel]
-        except Exception:
-            print 'Acceptable values are 0 to %d.'%i
-        else:
-            if sel == 0:
-                exit()
-            else:
-                print "Testing:  Feusb('%s')"%ports[sel]
-                try:
-                    dev = Feusb(ports[sel])
-                except OpenError, e:
-                    sys.stderr.write(str(e)+'\n')
-                else:
-                    break
-    # RAW READ AND WRITE AND WAITING TESTS
-    print "Testing:  raw_write('u\\r')"
-    dev.raw_write('u\r')
-    print 'Testing:  raw_waiting() and waiting()'
-    while True:
-        rw = dev.raw_waiting()
-        w = dev.waiting()
-        print 'raw_waiting() returned:  %d'%rw
-        print 'waiting() returned:  %d'%w
-        if w > 1:
-            break
-        print 'Sleeping for 1 mS.'
-        time.sleep(.001)
-    print 'Testing:  raw_read()\nReply received below:\n', dev.raw_read(),
-    # NUMERIC READ FORMAT TESTS
-    print "Testing:  read('m1')"
-    print 'Reply received:  ', dev.read('m1')
-    print "Testing:  read('s1')"
-    print 'Reply received:  ', dev.read('s1')
-    print "Testing:  read('m')"
-    print 'Reply received:  ', dev.read('m')
-    print "Testing:  read('m1s1m', 3)"
-    print 'Reply received:\n', dev.read('m1s1m', 3)
-    print "Testing:  read('s')"
-    r = repr(dev.read('s'))
-    print 'Reply received:'
-    print r[:56]
-    print r[56:112]
-    print r[112:168]
-    print r[168:]
-    # STATUS TESTS
-    print 'Testing:  status()\n*** Unplug the device ***'
-    old_stat = ''
-    while True:
-        stat = dev.status()
-        if old_stat is not stat:
-            print 'Device status is: ', stat
-        old_stat = stat
-        if stat is DISCONNECTED:
-            break
-        time.sleep(0.050)
-    print 'Testing:  reconnect()'
-    while True:
-        try:
-            dev.reconnect()
-        except OpenError, e:
-            time.sleep(0.100)
-        else:
-            print "Verifying reconnect:"
-            dev.raw_write('u\r')
-            while dev.waiting() < 1:
-                print 'Sleeping for 1 mS.'
-                time.sleep(0.001)
-            print dev.raw_read(),
-            break
-    # SUSPEND/RESUME DURING READ
-    print "Testing:  raw_write, raw_waiting, raw_read, error_on_suspend."
-    print "Sleep/resume computer to test for read errors."
-    print "Disconnect device to end the test."
-    NUMCMDS = 240
-    dev.raw_write('cs\r')
-    while dev.waiting() < 1:
-        time.sleep(0.001)
-    comparison_string = dev.raw_read()
-    comparison_length = len(comparison_string)
-    print "Each 'r' represents %d characters read."%(NUMCMDS*comparison_length)
-    dev.error_on_suspend(True)
-    keep_going = True
-    while keep_going:
+    try:
+        print 'feusb_win32 - Fascinating Electronics USB comm port class.'
+        # OPEN THE PORT
         while True:
+            print '\nAvailable Ports\nSEL   Comm Port\n---   ---------'
+            ports = ['Quit'] + port_list()
+            for i, v in enumerate(ports):
+                print '%3d     %s'%(i, v)
             try:
-                dev.raw_write('s'*NUMCMDS+'\r')
-            except SuspendError:
-                print "SuspendError reported during raw_write().",
-                print "Sleeping 1 second."
-                time.sleep(1.0)
-            except DisconnectError:
-                print "DisconnectError reported during raw_write()."
-                keep_going = False
-                break
+                sel = abs(int(raw_input('Select a comm port or 0 to Quit -->')))
+                ports[sel]
+            except Exception:
+                print 'Acceptable values are 0 to %d.'%i
             else:
-                print 'w',
-                break
-        read_tries = 0
-        responses_read = 0
-        while keep_going and responses_read < NUMCMDS:
-            try:
-                num_of_characters = dev.raw_waiting()
-            except SuspendError:
-                print "SuspendError reported during raw_waiting(). ",
-                print "Sleeping 1 second."
-                time.sleep(1.0)
-            else:
-                read_tries += 1
-                if num_of_characters >= comparison_length:
-                    read_tries = 0
+                if sel == 0:
+                    exit()
+                else:
+                    print "Testing:  Feusb('%s')"%ports[sel]
                     try:
-                        response = dev.raw_read(comparison_length)
-                    except SuspendError:
-                            print "SuspendError during raw_read(). ",
-                            print "Sleeping 1 second."
-                            time.sleep(1.0)
+                        dev = Feusb(ports[sel])
+                    except OpenError, e:
+                        sys.stderr.write(str(e)+'\n')
                     else:
-                        responses_read += 1
-                        if response != comparison_string:
-                            print "\nResponse does not match expected:"
-                            print response
-                            #flush remaining buffer
-                            print "Flushing remaining characters."
-                            while len(response) > 0:
-                                time.sleep(0.25)
-                                try:
-                                    response = dev.raw_read()
-                                except SuspendError:
-                                    print "SuspendError while flushing buffer."
-                                    time.sleep(0.75)
-                                else:
-                                    print "Flushed %d characters."%len(response)
-                            break
-                if read_tries >= 10:
-                    print "10 attempted reads without getting a full response."
-                    current_status = dev.status()
-                    print "dev.status() reports: %s"%current_status
-                    if current_status is DISCONNECTED:
-                        keep_going = False
-                    else:
-                        print "%d responses read correctly so far."%responses_read
-                        print "Number of waiting characters: ", num_of_characters
-                        if num_of_characters > 0:
-                            print "Response at this time:"
-                            print dev.raw_read()
                         break
-                time.sleep(0.002)
-        if responses_read == NUMCMDS:
-            print 'r',
-    print 'Reconnecting.'
-    while True:
-        try:
-            dev.reconnect()
-        except OpenError:
-            time.sleep(0.100)
-        else:
-            break
-    # *********** THIS MAY HAVE BEEN HANDLED BY THE PREVIOUS TESTING ***********
-    print "Read-Suspend Testing. Suspend and resume computer several times."
-    print "To exit this test, disconnect the device and reattach."
-    read_count = 0
-    while read_count != -1:
-        read_count += 1
-        try:
-            anA, sA = dev.read('ms', 2)
-            sB, anB = dev.read('sm', 2)
-        except DisconnectError, e:
-            print "%s Reconnect to continue."%e
+        # RAW READ AND WRITE AND WAITING TESTS
+        print "Testing:  raw_write('u\\r')"
+        dev.raw_write('u\r')
+        print 'Testing:  raw_waiting() and waiting()'
+        while True:
+            rw = dev.raw_waiting()
+            w = dev.waiting()
+            print 'raw_waiting() returned:  %d'%rw
+            print 'waiting() returned:  %d'%w
+            print dev._string_buffer
+            if w == 1:
+                break
+            print 'Sleeping for 1 mS.'
+            time.sleep(.001)
+        print 'Testing:  raw_read()\nReply received:\n', dev.raw_read(),
+        # NUMERIC READ FORMAT TESTS
+        print "Testing:  read('m1')"
+        print 'Reply received:  ', dev.read('m1')
+        print "Testing:  read('s1')"
+        print 'Reply received:  ', dev.read('s1')
+        print "Testing:  read('m')"
+        print 'Reply received:  ', dev.read('m')
+        print "Testing:  read('m1s1m', 3)"
+        print 'Reply received:\n', dev.read('m1s1m', 3)
+        print "Testing:  read('s')"
+        r = repr(dev.read('s'))
+        print 'Reply received:'
+        print r[:56]
+        print r[56:112]
+        print r[112:168]
+        print r[168:]
+        # SUSPEND/RESUME DURING RAW_READ
+        print "Testing:  raw_write, raw_waiting, raw_read, error_on_suspend."
+        print "Sleep/resume computer to test for read errors."
+        print "Disconnect device to end this test."
+        NUMCMDS = 240
+        dev.raw_write('cs\r')
+        while dev.waiting() < 1:
+            time.sleep(0.001)
+        comparison_string = dev.raw_read()
+        comparison_length = len(comparison_string)
+        print ("Each 'r' represents %d characters read."
+               %(NUMCMDS*comparison_length))
+        dev.error_on_suspend(True)
+        keep_going = True
+        while keep_going:
+            while True:
+                try:
+                    dev.raw_write('s'*NUMCMDS+'\r')
+                except SuspendError:
+                    print ('SuspendError reported during raw_write(). '
+                           'Sleeping 1 second.')
+                    time.sleep(1.0)
+                except DisconnectError:
+                    print 'DisconnectError reported during raw_write().'
+                    keep_going = False
+                    break
+                else:
+                    print 'w',
+                    break
+            read_tries = 0
+            responses_read = 0
+            while keep_going and responses_read < NUMCMDS:
+                try:
+                    num_of_characters = dev.raw_waiting()
+                except SuspendError:
+                    print ('SuspendError reported during raw_waiting(). '
+                           'Sleeping 1 second.')
+                    time.sleep(1.0)
+                else:
+                    read_tries += 1
+                    if num_of_characters >= comparison_length:
+                        read_tries = 0
+                        try:
+                            response = dev.raw_read(comparison_length)
+                        except SuspendError:
+                                print ('SuspendError during raw_read(). '
+                                       'Sleeping 1 second.')
+                                time.sleep(1.0)
+                        else:
+                            responses_read += 1
+                            if response != comparison_string:
+                                print "\nResponse does not match expected:"
+                                print response
+                                print "Purging remaining characters."
+                                dev.purge()
+                                break
+                    if read_tries >= RETRY_LIMIT:
+                        print ('\n%d attempted reads without getting a full '
+                               'response.'%RETRY_LIMIT)
+                        time.sleep(0.500) #time for a disconnect to be detected
+                        current_status = dev.status()
+                        print 'dev.status() reports: %s'%current_status
+                        if current_status is DISCONNECTED:
+                            keep_going = False
+                            break
+                        else:
+                            print ('%d responses read correctly so far.'
+                                   %responses_read)
+                            print ('Number of waiting characters: %d'
+                                   %num_of_characters)
+                            if num_of_characters > 0:
+                                print 'Response at this time:'
+                                print dev.raw_read()
+                        print 'Port is probably unresponsive.'
+                        ri = raw_input('Hit <enter> to exit, or any key '
+                                       '<enter> to disconnect and reconnect ->')
+                        if ri == '':
+                            exit()
+                        else:
+                            print '*** Unplug the device ***'
+                            old_stat = ''
+                            stat = ''
+                            while stat is not DISCONNECTED:
+                                stat = dev.status()
+                                if old_stat is not stat:
+                                    print 'Device status is:', stat
+                                old_stat = stat
+                                time.sleep(0.050)
+                            print '*** Plug in the device ***'
+                            while True:
+                                try:
+                                    dev.reconnect()
+                                except OpenError:
+                                    time.sleep(0.050)
+                                else:
+                                    break
+                            print 'Device status is:', dev.status()
+                            break
+                    time.sleep(RETRY_INTERVAL)
+            if responses_read == NUMCMDS:
+                print 'r',
+        dev.error_on_suspend(False)
+        if dev.status() is not PORT_OK:        
+            print '*** Plug in the device ***'
             while True:
                 try:
                     dev.reconnect()
-                except OpenError, e:
+                except OpenError:
                     time.sleep(0.100)
                 else:
-                    read_count = -1
                     break
-        except ReadTimeoutError, e:
-            print "Unexpected ReadTimeoutError! %s"%e
-        except FeusbError, e:
-            print "Unexpected FeusbError! %s"%e
-        else:
-            if (len(anA) == 8 and len(sA) == 16 and
-                len(sB) == 16 and len(anB) == 8):
-                if read_count % 100 == 0:
-                    print "Reads are OK %6i times."%read_count
+        # SUSPEND/RESUME DURING READ
+        print "Testing:  read (and consequently write)."
+        print "Sleep/resume computer to test for read errors."
+        print "Disconnect device to end this test."
+        NUMCMDS = 240
+        dev.raw_write('S\r')
+        while dev.waiting() < 1:
+            time.sleep(RETRY_INTERVAL)
+        comp_len = dev.raw_waiting()
+        comp = dev.read()
+        print ("Each '*' represents %d characters and %d commands read."
+               %(comp_len*NUMCMDS, NUMCMDS))
+        while True:
+            try:
+                responses = dev.read('S'*NUMCMDS, NUMCMDS)
+            except DisconnectError, e:
+                print 'DisconnectError reported during read().'
+                print 'Details:\n', e
+                break
+            except ReadTimeoutError, e:
+                print 'ReadTimeoutError reported during read().'
+                print 'Details:\n', e
+                print '%d characters in input buffer.'%dev.raw_waiting()
+                print '%d responses in input buffer.'%dev.waiting()
+                print 'Purging port.'
+                dev.purge()
+                # test port status (could have timed out due to disconnect)
+                print 'Testing port status.'
+                status = dev.status()
+                while status is not PORT_OK:
+                    if status == DISCONNECTED:
+                        print 'Port status is actually DISCONNECTED.'
+                        break
+                    elif status == SUSPENDED:
+                        print 'Status is SUSPENDED. Sleeping 1 second.'
+                        time.sleep(1.000)
+                    status = dev.status()
+                if status is DISCONNECTED:
+                    break
+                elif status is PORT_OK:
+                    print 'Port status returns PORT_OK.'
+                else:
+                    print 'Port status error!'
+                try:        # test for port unresponsive
+                    response = dev.read('U')
+                except DisconnectError, e:
+                    print 'DisconnectError reported testing responsiveness.'
+                    print 'Details:\n', e
+                    break
+                except ReadTimeoutError, e:
+                    print 'ReadTimeoutError reported testing responsiveness.'
+                    print 'Details:\n', e
+                    print 'Port is unresponsive.'
+                    print '*** Unplug the device ***'
+                    old_stat = ''
+                    stat = ''
+                    while stat is not DISCONNECTED:
+                        stat = dev.status()
+                        if old_stat is not stat:
+                            print 'Device status is:', stat
+                        old_stat = stat
+                        time.sleep(0.050)
+                    break
+                else:
+                    print 'Port checks out OK.'
             else:
-                print "Read value length mismatch occurred."
-                read_count = 0
+                match = 0
+                for response in responses:
+                    if comp == response:
+                        match += 1
+                    else:
+                        print 'Expected: %s Got: %s'%(repr(comp),repr(response))
+                if match == NUMCMDS:
+                    print '*',
+                else:
+                    print '\n%d of %d match correctly.'%(match, NUMCMDS)
+        print 'Reconnecting.'
+        while True:
+            try:
+                dev.reconnect()
+            except OpenError:
+                time.sleep(0.100)
+            else:
+                break
+        del(dev)
+        raw_input("Tests complete. Hit <enter> to exit -->")
+    except Exception, e:
+        print "Unhandled main program exception!!!"
+        print type(e)
+        print e
+        raw_input("Hit enter to exit ->")
+        
