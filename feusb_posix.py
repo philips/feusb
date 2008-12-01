@@ -93,17 +93,6 @@ class UnexpectedError(FeusbError):
 class Feusb:
     """Fascinating Electronics USB-CDC device class."""
 
-    BaudRatesDic={
-        110: termios.B110,
-        300: termios.B300,
-        600: termios.B600,
-        1200: termios.B1200,
-        2400: termios.B2400,
-        4800: termios.B4800, 
-        9600: termios.B9600,
-        19200: termios.B19200,
-        38400: termios.B38400,
-        57600: termios.B57600,
         115200: termios.B115200
         }
 
@@ -118,42 +107,20 @@ class Feusb:
         try:
             self._handle = os.open(self._port_string, os.O_RDWR, 0)
 
-            self.__speed=115200
-    
-            # Save the initial port configuration
-            self.__oldmode = termios.tcgetattr(self._handle)
-            # self.__params is a list of attributes of the file descriptor
-            # self._handle as follows:
-            # [c_iflag, c_oflag, c_cflag, c_lflag, c_ispeed, c_ospeed, cc]
-            # where cc is a list of the tty special characters.
+            # setup tcsetattr for setting serial options
             self.__params=[]
-            # c_iflag
-            self.__params.append(termios.IGNPAR)
-            # c_oflag
-            self.__params.append(0)
-            # c_cflag
-            self.__params.append(termios.CS8|termios.CLOCAL|termios.CREAD)
-            # c_lflag
-            self.__params.append(0)
-            # c_ispeed
-            self.__params.append(self.BaudRatesDic[self.__speed]) 
-            # c_ospeed
-            self.__params.append(self.BaudRatesDic[self.__speed]) 
+            self.__params.append(termios.IGNPAR) # c_iflag
+            self.__params.append(0) # c_oflag
+            self.__params.append(termios.CS8|termios.CLOCAL|termios.CREAD) # c_cflag
+            self.__params.append(0) # c_lflag
+            self.__params.append(termios.B115200)  # c_ispeed
+            self.__params.append(termios.B115200)  # c_ospeed
             cc=[0]*termios.NCCS
-            # A reading is only complete when VMIN characters have
-            # been received (blocking reading)
-            cc[termios.VMIN]=1
+            cc[termios.VMIN]=0 # Non-blocking reading.
             cc[termios.VTIME]=0
-            # Non-blocking reading. The reading operation returns
-            # inmeditately, returning the characters waiting to 
-            # be read.
-            cc[termios.VMIN]=0
-            cc[termios.VTIME]=0
-    
             self.__params.append(cc)               # c_cc
-    
-            termios.tcsetattr(self._handle, termios.TCSANOW, self.__params)
 
+            termios.tcsetattr(self._handle, termios.TCSANOW, self.__params)
 	except exceptions.IOError, e:
 		raise OpenError()
         except Exception, e:
