@@ -53,8 +53,13 @@ def port_list():
     """Return a list of the available serial ports (as strings)."""
     ports = []
     list = []
-    list.extend(glob.glob('/dev/ttyACM*'))
-    list.extend(glob.glob('/dev/fercs*'))
+
+    if sys.platform=='linux2':
+        list.extend(glob.glob('/dev/ttyACM*'))
+        list.extend(glob.glob('/dev/fercs*'))
+    elif sys.platform=='darwin':
+        list.extend(glob.glob('/dev/tty.usbmodem*'))
+
     for port in list:
         try:
             p = Feusb(port)
@@ -102,7 +107,8 @@ class Feusb:
         self._string_buffer = ''
         self._status = DISCONNECTED
         try:
-            self._handle = os.open(self._port_string, os.O_RDWR, 0)
+            self._handle = os.open(self._port_string, os.O_RDWR | os.O_NONBLOCK)
+            self.__oldmode=termios.tcgetattr(self._handle)
 
             # setup tcsetattr for setting serial options
             self.__params=[]
@@ -112,7 +118,10 @@ class Feusb:
             self.__params.append(0) # c_lflag
             self.__params.append(termios.B115200)  # c_ispeed
             self.__params.append(termios.B115200)  # c_ospeed
-            cc=[0]*termios.NCCS
+            if sys.platform=='linux2':
+                cc=[0]*termios.NCCS
+            elif sys.platform=='darwin':
+                cc=[0]*len(self.__oldmode[6])
             cc[termios.VMIN]=0 # Non-blocking reading.
             cc[termios.VTIME]=0
             self.__params.append(cc)               # c_cc
@@ -142,7 +151,22 @@ class Feusb:
         if self._status is DISCONNECTED:
             raise DisconnectError("Port %s is disconnected."
                                   %self._port_string)
-        flags = termios.tcdrain(self._handle)
+
+        retries = 0
+
+        while retries < RETRY_LIMIT:
+            time.sleep(RETRY_INTERVAL)
+            count = self.raw_waiting()
+            print count
+            self._string_buffer = ''
+            flags = termios.tcdrain(self._handle)
+
+            if count == 0:
+                retries += 1
+
+        if self._status is DISCONNECTED:
+            raise DisconnectError("Port %s is disconnected."
+                                  %self._port_string)
 
     def error_on_suspend(self, new_error_on_suspend=None):
         """Return error_on_suspend status, with optional set parameter."""
