@@ -139,9 +139,14 @@ class Feusb:
 
     def __del__(self):
         """Close the port."""
-        if self._handle is not -1:
+        self._close()
+
+    def _close(self):
+        try:
             os.close(self._handle)
-            self._handle = -1
+        except OSError, e:
+            if e.errno is not 9:
+                raise e
 
     def purge(self):
         """Purge input buffer and attempt to purge device responses."""
@@ -311,9 +316,16 @@ class Feusb:
             raise DisconnectError("Port %s needs to be reconnected before use."
                                   %self._port_string)
         while True:
-            os.write(self._handle, string)
-            self._status = PORT_OK
-            return
+            try:
+                os.write(self._handle, string)
+            except OSError, e:
+                if e.errno == 5:
+                    self._status = DISCONNECTED
+                raise DisconnectError("Port %s needs to be reconnected before use."
+                                      %self._port_string)
+            else:
+                self._status = PORT_OK
+                return
 
     def write(self, command=''):
         """Write commands as UPPERCASE terminated with '\r' to the port."""
@@ -334,6 +346,7 @@ class Feusb:
 	except OSError, e:
             if e.errno == 5:
                 self._status = DISCONNECTED
+            return DISCONNECTED
         except Exception, e:
             raise UnexpectedError('Unexpected error in status.\n'
                                   '%s\nDetails: %s'
@@ -347,12 +360,12 @@ class Feusb:
         if self._status is not DISCONNECTED:
             raise OpenError("Port %s is not disconnected."%self._port_string)
         try:
-            if self._handle is not -1:
-                os.close(self._handle)
+            self._close()
             self._handle = os.open(self._port_string, os.O_RDWR, 0) 
         except OSError, e:
-            if e.errno == 22:
+            if e.errno == 22 or e.errno == 2:
                 raise OpenError('Unable to reopen port %s.'%self._port_string)
+            raise e
         except Exception, e:
             raise UnexpectedError('Unexpected error in reconnect.\n'
                                   '%s\nDetails: %s'
@@ -396,7 +409,6 @@ if __name__=='__main__':
             w = dev.waiting()
             print 'raw_waiting() returned:  %d'%rw
             print 'waiting() returned:  %d'%w
-            print dev._string_buffer
             if w == 1:
                 break
             print 'Sleeping for 1 mS.'
@@ -526,7 +538,7 @@ if __name__=='__main__':
                 print 'r',
                 sys.stdout.flush()
         dev.error_on_suspend(False)
-        if dev.status() is not PORT_OK:        
+        if dev.status() is not PORT_OK:
             print '*** Plug in the device ***'
             while True:
                 try:
@@ -609,6 +621,7 @@ if __name__=='__main__':
                         print 'Expected: %s Got: %s'%(repr(comp),repr(response))
                 if match == NUMCMDS:
                     print '*',
+                    sys.stdout.flush()
                 else:
                     print '\n%d of %d match correctly.'%(match, NUMCMDS)
         print 'Reconnecting.'
